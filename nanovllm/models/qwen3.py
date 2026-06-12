@@ -4,10 +4,12 @@ import torch.distrubuted as dist
 
 from transformers import Qwen3Config
 
-from nanovllm.layers.linear import QKVParallelLinear, RowParallelLinear
-from nanovllm.layers.embed_head import VocabParallelEmbedding
+from nanovllm.layers.linear import QKVParallelLinear, RowParallelLinear, MergedColumnParallelLinear
+from nanovllm.layers.embed_head import VocabParallelEmbedding,ParallelLMHead
 from nanovllm.layers.layernorm import RMSNorm
 from nanovllm.layers.rotary_embedding import get_rope
+from nanovllm.layers.Attention import Attention
+from nanovllm.layers.activation import SiluAndMul
 
 class Qwen3SelfAttention(nn.Module):
     def __init__(
@@ -63,7 +65,55 @@ class Qwen3SelfAttention(nn.Module):
             self.scaling,
             self.num_kv_heads,
         )
+        if not self.qkv_bias:
+            self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
+            self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        qkv = self.qkv_proj(hidden_states)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        q = q.view(-1, self.num_heads, self.head_dim)
+        k = k.view(-1, self.num_kv_heads, self.head_dim)
+        v = v.view(-1, self.num_kv_heads, self.head_dim)
+        if not self.qkv_bias:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
+        q, k = self.rotary_emb(positions, q, k)
+        o = self.attn(q, k, v)
+        output = self.o_proj(o.flatten(1, -1))
+        return output
+    
+class Qwen3MLP(nn.Module):
 
+    def __init__(
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        hidden_act: str,
+    ) -> None:
+        super().__init__()
+        self.gate_up_proj = MergedColumnParallelLinear(
+            hidden_size,
+            [intermediate_size] * 2,
+            bias=False,
+        )
+        self.down_proj = RowParallelLinear(
+            intermediate_size,
+            hidden_size,
+            bias=False,
+        )
+        assert hidden_act == "silu"
+        self.act_fn = SiluAndMul()
+    def forward(self, x):
+        gate_up = self.gate_up_proj(x)
+        x = self.act_fn(gate_up)
+        x = self.down_proj(x)
+        return x
+        
+    
 
 class Qwen3DecoderLayer(nn.Module):
     def __init__(
@@ -127,3 +177,34 @@ class Qwen3Model(nn.Module):
             hidden_states, residual = layer(positions, hidden_states, residual)
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
+
+class Qwen3ForCausalLM(nn.Module):
+    packed_modules_mapping = {
+        "q_proj": ("qkv_proj", "q"),
+        "k_proj": ("qkv_proj", "k"),
+        "v_proj": ("qkv_proj", "v"),
+        "gate_proj": ("gate_up_proj", 0),
+        "up_proj": ("gate_up_proj", 1),
+    }
+    def __init__(
+        self,
+        config: Qwen3Config,
+    ) -> None:
+        super().__init__()
+        self.model = Qwen3Model(config)
+        self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
+        if config.tie_word_embeddings:
+            self.lm_head.weight.data = self.model.embed_tokens.weight.data
+        
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.model(input_ids, positions)
+
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.lm_head(hidden_states)
