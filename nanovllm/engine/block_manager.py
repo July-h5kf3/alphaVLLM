@@ -52,6 +52,10 @@ class BlockManager:
         block.reset()
         self.used_block_ids.add(block_id)
         return block_id
+    def _deallocate_block(self,block_id: int):
+        assert self.blocks[block_id].ref_count == 0
+        self.used_block_ids.remove(block_id)
+        self.free_block_ids.append(block_id)
     
     def may_append(self, seq: Sequence):
         if len(seq) % self.block_size == 1:
@@ -101,3 +105,27 @@ class BlockManager:
         for i in range(num_cached_blocks, seq.num_blocks):
             seq.block_table.append(self._allocate_block())
         seq.num_cached_tokens = num_cached_blocks * self.block_size
+    def deallocate(self, seq:Sequence):
+        for block_id in reversed(seq.block_table):
+            block = self.blocks[block_id]
+            block.ref_count -= 1
+            if block.ref_count == 0:
+                self._deallocate_block(block_id)
+
+        seq.num_cached_tokens = 0
+        seq.block_table.clear()
+
+    def hash_block(self,seq: Sequence):
+        #这里的hash计算是通过当前block的token和前一个block中的token hash计算得到的
+        #这是因为prefix cache复用必须保证从开头到该token地整段token都一样
+        start = seq.num_cached_tokens // self.block_size
+        end = (seq.num_cached_tokens + seq.num_scheduled_tokens) // self.block_size
+        if start == end:
+            return
+        h = self.blocks[seq.block_table[start - 1].hash if start > 0 else -1]
+        for i in range(start, end):
+            block = self.blocks[seq.block_table[i]]
+            token_ids = seq.block(i)
+            h = self.compute_hash(token_ids, h)
+            block.update(h, token_ids)
+            self.hash_to_block_id[h] = block.block_id

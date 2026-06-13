@@ -43,9 +43,12 @@ class LLMEngine:
         self.scheduler.add(seq)
         
     def step(self):
-        seqs, is_prefill = self.scheduler.schedule() #看到这了，基本没看schedule
+        seqs, is_prefill = self.scheduler.schedule()
         num_tokens = sum(seq.num_scheduled_tokens for seq in seqs) if is_prefill else -len(seqs)
-        token_ids = self.model_runner.call("run", seqs, is_prefill)
+        token_ids = self.model_runner.call("run", seqs, is_prefill)#生成新的token
+        self.scheduler.postprocess(seqs, token_ids, is_prefill)
+        outputs = [(seq.seq_id, seq.comletion_token_ids) for seq in seqs if seq.is_finished]
+        return outputs, num_tokens
         
 
     def generate(
@@ -64,3 +67,18 @@ class LLMEngine:
         while not self.is_finished():
             t = perf_counter()
             output, num_tokens = self.step()
+            if num_tokens > 0:
+                prefill_throughput = num_tokens / (perf_counter() - t)
+            else:
+                decode_throughput = -num_tokens / (perf_counter() - t)
+            pbar.set_postfix({
+                "Prefill": f"{int(prefill_throughput)}tok/s",
+                "Decode": f"{int(decode_throughput)}tok/s",
+            })
+            for seq_id, token_ids in output:
+                outputs[seq_id] = token_ids
+                pbar.update(1)
+        pbar.close()
+        outputs = [outputs[seq_id] for seq_id in sorted(outputs.keys())]
+        outputs = [{"text": self.tokenizer.decode(token_ids), "token_ids": token_ids} for token_ids in outputs]
+        return outputs
