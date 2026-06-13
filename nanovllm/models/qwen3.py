@@ -1,6 +1,6 @@
 import torch
 from torch import nn
-import torch.distrubuted as dist
+import torch.distributed as dist
 
 from transformers import Qwen3Config
 

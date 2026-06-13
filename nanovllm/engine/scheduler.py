@@ -79,13 +79,13 @@ class Scheduler:
                 seq.is_prefill = False
                 self.block_manager.may_append(seq) #如果加入一个新的token后需要新分配一个block
                 scheduled_seqs.append(seq)
-            assert scheduled_seqs
-            self.running.extendleft(reversed(scheduled_seqs))
-            return scheduled_seqs, False
+        assert scheduled_seqs
+        self.running.extendleft(reversed(scheduled_seqs))
+        return scheduled_seqs, False
     def postprocess(self,seqs: list[Sequence], token_ids: list[int], is_prefill: bool):
         #生成新token后，首先保存prefix cache
         for seq, token_id in zip(seqs, token_ids):
-            self.block_manager.hash_blocks(seq)
+            self.block_manager.hash_block(seq)
             seq.num_cached_tokens += seq.num_scheduled_tokens
             seq.num_scheduled_tokens = 0
             if is_prefill and seq.num_cached_tokens < seq.num_tokens: #chunked prefill

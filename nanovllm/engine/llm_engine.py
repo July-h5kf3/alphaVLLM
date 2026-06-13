@@ -33,12 +33,20 @@ class LLMEngine:
         config.eos = self.tokenizer.eos_token_id
         self.scheduler = Scheduler(config)
         atexit.register(self.exit)
-    
+    def exit(self):
+        self.model_runner.call("exit")
+        del self.model_runner
+        for p in self.ps:
+            p.join()
+    def is_finished(self):
+        return self.scheduler.is_finished()
     def add_request(
         self,
         prompt: str | list[int],
         sampling_params: SamplingParams,
     ):
+        if isinstance(prompt,str):
+            prompt = self.tokenizer.encode(prompt)
         seq = Sequence(prompt, sampling_params)
         self.scheduler.add(seq)
         
@@ -47,7 +55,7 @@ class LLMEngine:
         num_tokens = sum(seq.num_scheduled_tokens for seq in seqs) if is_prefill else -len(seqs)
         token_ids = self.model_runner.call("run", seqs, is_prefill)#生成新的token
         self.scheduler.postprocess(seqs, token_ids, is_prefill)
-        outputs = [(seq.seq_id, seq.comletion_token_ids) for seq in seqs if seq.is_finished]
+        outputs = [(seq.seq_id, seq.completion_token_ids) for seq in seqs if seq.is_finished]
         return outputs, num_tokens
         
 

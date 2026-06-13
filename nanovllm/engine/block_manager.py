@@ -122,7 +122,7 @@ class BlockManager:
         end = (seq.num_cached_tokens + seq.num_scheduled_tokens) // self.block_size
         if start == end:
             return
-        h = self.blocks[seq.block_table[start - 1].hash if start > 0 else -1]
+        h = self.blocks[seq.block_table[start - 1] ].hash if start > 0 else -1
         for i in range(start, end):
             block = self.blocks[seq.block_table[i]]
             token_ids = seq.block(i)
